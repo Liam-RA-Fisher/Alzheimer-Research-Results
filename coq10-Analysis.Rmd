@@ -1,0 +1,284 @@
+---
+title: "CoQ10 Analysis"
+author: "Liam Fisher"
+date: "7/8/2021"
+output:
+  rmdformats::robobook:
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: false
+    highlight: tango
+---
+
+```{r, echo=FALSE, out.width="70%", fig.align="center"}
+# knitr::include_graphics(".../1200px-CoenzymeQ10.svg.png")
+# Optionally Include Image of CoQ10
+```
+
+# Analysis Objective
+
+The ADNI database was analyzed using feature selection techniques to identify associations to Alzheimer Disease. One of the associations that was discovered was between Coenzyme Q10 and AD. Coq10 is a natural supplement often used to help alleviate blood pressure and cognition problems. There was also a study done testing the impact of Coenzyme Q10 on AD called __Coenzyme Q10 decreases amyloid pathology and improves behavior in a transgenic mouse model of Alzheimer's disease__. \
+ \
+[Link to Paper](https://pubmed.ncbi.nlm.nih.gov/21799249/) \
+ \
+Due to the fact that coq10 is reported to impact amyloid pathology, and was uncovered as an important feature from the analysis of ADNI data, a deeper investigation may be warranted. The purpose of this analysis is to Analyse the impact of Coenzyme Q10 on the diagnosis of Alzheimers. \
+ \
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+library(nnet)
+library(tidyverse)
+library(ggmosaic)
+library(ggpubr)
+library(plotly)
+```
+
+# Reading Data
+
+```{r, message=FALSE, warning=FALSE}
+# Data from ADNI
+data <- 
+  read_csv(".../ADNIMERGE.csv") %>%
+  mutate(Diagnosis = recode(DX_bl, EMCI = "MCI", LMCI = "MCI", SMC = "CN")) %>%
+  filter(VISCODE == "bl") %>%
+  select(RID, Diagnosis, AGE, APOE4, PTEDUCAT, MMSE_bl) %>%
+  drop_na()
+
+coq10_drugs <- 
+  read_csv(".../coq10_data.csv") %>%
+  filter(VISCODE2 %in% c("sc", "bl")) %>%
+  select(RID, VISCODE2, CMMED, CMDOSE, CMFREQNC, CMREASON) %>%
+  mutate(CMMED = if_else(CMMED %in% c("coq10"), "1", "0")) %>%
+  mutate(CMMED = as.integer(CMMED)) %>%
+  group_by(RID) %>%
+  summarise(coq10 = sum(CMMED)) %>%
+  mutate(coq10 = replace(coq10, coq10 == 2, 1))
+
+data <- data %>%
+  left_join(coq10_drugs, by = "RID") %>%
+  drop_na()
+```
+
+The data tables used in this analysis are: \
+ \
+ __ADNIMERGE:__ Baseline diagnoses and basic patient information have been extracted from ADNIMERGE. ADNIMERGE is a table provided by ADNI containing key information from many other merged data tables and serves as a good starting point for data analysis. \
+
+  - Includes demographics, neuropsychological testing scores, MRI and PET summaries, CSF measures. \
+    
+  - Also includes both a baseline diagnosis and diagnosis at each visit. \
+
+ \
+__RECCMEDS:__ Drug information has been extracted for all study phases from RECCMEDS (Concurrent Medications Log [ADNI1,GO,2,3]). \
+ \
+The drug table was also pre cleaned prior to reading. Coq10 was coded many different ways in the table and these were all recoded to the format of _coq10_ in Excel.
+
+# Frequencies
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+data %>%
+  mutate(coq10 = case_when(
+  coq10 == 1 ~ "Uses COQ10",
+  coq10 == 0 ~ "Does Not Use COQ10"
+  )) %>%
+  group_by(coq10) %>%
+  summarise(Participants = n()) %>%
+  ggplot(aes(coq10, Participants)) +
+    geom_col(fill = "#331b6b") + 
+    geom_text(aes(label=Participants), vjust=-0.5) +
+    theme_minimal() +
+    ggtitle("Number of Particiants by COQ10 Use")
+
+data %>%
+  group_by(Diagnosis) %>%
+  summarise(Participants = n()) %>%
+  ggplot(aes(Diagnosis, Participants)) +
+    geom_col(fill = "#331b6b") + 
+    geom_text(aes(label=Participants), vjust=-0.5) +
+    theme_minimal() +
+    ggtitle("Number of Particiants by Diagnosis")
+```
+
+# Testing COQ10's connection to AD
+
+Multinomial Logistic will be used to test the connection between COQ10 and AD diagnosis. \
+ \
+__Null Hypothesis:__ There is no connection between COQ10 and ADdiagnosis. \
+ \
+__Alternative Hypothesis:__ There is a connection between COQ10 and ADdiagnosis. \
+ \
+
+## Screening for Confoundings
+
+ChiSquared and Anova will be used to test for connections between potential confounding variables and the use of COQ10.
+
+#### Apoe4
+
+```{r,message=FALSE, warning=FALSE}
+chisq.test(data$coq10, data$APOE4, correct=FALSE)
+```
+
+#### Age
+
+```{r,message=FALSE, warning=FALSE}
+summary(aov(PTEDUCAT ~ coq10, data = data))
+```
+
+#### Education
+
+```{r,message=FALSE, warning=FALSE}
+summary(aov(AGE ~ coq10, data = data))
+```
+
+#### Mini Mental State Exam
+
+```{r,message=FALSE, warning=FALSE}
+summary(aov(MMSE_bl ~ coq10, data = data))
+```
+
+#### Visualization of Statistically Significant Confounders.
+
+Age and Education are the statistically significant potential confounding variables.
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, out.width="95%"}
+ggplotly(ggboxplot(data, x = "coq10", y = "AGE", 
+          color = "coq10", palette = c("#00AFBB", "#E7B800"),
+          order = c(0, 1),
+          ylab = "Age", xlab = "Coq10") +
+    theme(legend.position="none"))%>%
+  config(displayModeBar = FALSE)
+
+data %>%
+  group_by(coq10) %>%
+  summarise(avg_age = mean(AGE))
+
+ggplotly(ggboxplot(data, x = "coq10", y = "PTEDUCAT", 
+          color = "coq10", palette = c("#00AFBB", "#E7B800"),
+          order = c(0, 1),
+          ylab = "Education", xlab = "Coq10") +
+    theme(legend.position="none"))%>%
+  config(displayModeBar = FALSE)
+
+data %>%
+  group_by(coq10) %>%
+  summarise(avg_age = mean(PTEDUCAT))
+```
+
+The effect of the significant confounding variables appears minimal. Significance may be due to sample size. The variables will still be included in the logistic regression model as controls.
+
+## Test
+
+```{r, message=FALSE, warning=FALSE}
+data$Diagnosis <- relevel(as.factor(data$Diagnosis), ref = "AD")
+test <- multinom(Diagnosis ~ coq10 + AGE + PTEDUCAT, data = as.data.frame(data))
+```
+
+_Diagnosis ~ coq10 + AGE + PTEDUCAT_ is the model formula. Diagnosis is being modeled by coq10, Age, and Education.
+
+## Assumptions
+
+```{r, message=FALSE, warning=FALSE}
+performance::check_collinearity(test)
+```
+
+The assumption of Multicollinearity is not violated in the Multinomial Logistic Regression model. A VIF above 5 is cause for concern and a VIF above 10 is a problem. All the variables of the model have a VIF below 5.
+
+# Results
+
+## Model Summary
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+summary(test)
+```
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+ggplot(data) +
+  geom_mosaic(aes(x = product(coq10), fill=Diagnosis)) +
+  theme_mosaic() +
+  theme(text = element_text(size = 20)) +
+  theme(legend.position="none")
+```
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+prop_AD_coq <- 
+  nrow(data %>%
+    filter(coq10 == 1) %>%
+    filter(Diagnosis == "AD")) /
+  nrow(data %>%
+    filter(coq10 == 1))
+
+prop_AD_no_coq <- 
+  nrow(data %>%
+    filter(coq10 == 0) %>%
+    filter(Diagnosis == "AD")) /
+  nrow(data %>%
+    filter(coq10 == 0))
+```
+
+Proportion of those with AD not on Coenzyme Q10: \
+__`r prop_AD_no_coq`__ \
+ \
+ Proportion of those with AD on Coenzyme Q10: \
+__`r prop_AD_coq`__ \
+
+## Hypothesis Test Adjusting for Confounders
+
+Coefficient P Values (Tests hypothesis that coefficient is not 0):
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+z <- summary(test)$coefficients/summary(test)$standard.errors
+p <- (1 - pnorm(abs(z), 0, 1)) * 2
+p
+```
+
+__Conclusion:__ There is not a statistically significant association between Diagnosis and the use of Coenzyme Q10 when accounting for age and education, a > .05.
+
+## Hypothesis Test Not Adjusting for Confounders
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+chisq.test(data[["Diagnosis"]], data[["coq10"]])
+```
+
+__Conclusion:__ There is a statistically significant association between Diagnosis and the use of Coenzyme Q10 when confounding variables are ignored, a > .05. More reliability, however, will be given to the test that accounts for confounders.
+
+# Thoughts for the future.
+
+Even though the logistic regression model, which accounted for age and education was not significant, the univariate ChiSquared test of Coenzyme Q10 and Diagnosis was. Another note is that the feature selection analysis selected a number of other drugs designed to treat hypertension like Coenzyme Q10. These drugs were Diovan, Lisinopril, and Amlodipine.
+
+## Visualization of Other Feature Selected BP Drugs
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+bp_drugs <- read_csv(".../data_ADNI1GO2.csv") %>%
+  select(DX_bl_recoded, CMMED_diovan, CMMED_lisinopril, CMMED_amlodipine) %>%
+  rename(Diagnosis = DX_bl_recoded) %>%
+  rename(Diovan = CMMED_diovan) %>%
+  rename(Lisinopril = CMMED_lisinopril) %>%
+  rename(Amlodipine = CMMED_amlodipine)
+
+ggplot(bp_drugs) +
+  geom_mosaic(aes(x = product(Diovan), fill=Diagnosis)) +
+  theme_mosaic() +
+  theme(text = element_text(size = 20)) +
+  theme(legend.position="none")
+
+ggplot(bp_drugs) +
+  geom_mosaic(aes(x = product(Lisinopril), fill=Diagnosis)) +
+  theme_mosaic() +
+  theme(text = element_text(size = 20)) +
+  theme(legend.position="none")
+
+ggplot(bp_drugs) +
+  geom_mosaic(aes(x = product(Amlodipine), fill=Diagnosis)) +
+  theme_mosaic() +
+  theme(text = element_text(size = 20)) +
+  theme(legend.position="none")
+```
+
+# Conclusion
+
+There seems to be some connection between Alzheimer's Disease and blood pressure and the treatment of blood pressure may impact AD. This will require further investigation.
+
+
+
+
+
+

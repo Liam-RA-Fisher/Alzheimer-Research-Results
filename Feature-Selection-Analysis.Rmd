@@ -1,0 +1,582 @@
+---
+title: "Feature Selection Analysis"
+author: "Liam Fisher"
+date: "6/24/2021"
+output:
+  rmdformats::robobook:
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: tango
+    fig_width: 7.5
+---
+
+# Analysis Objective
+
+We intend to analyze data from ADNI to identify small molecules for drug re-purposing for Alzheimer's Disease treatment and prevention. \
+ \
+The data we intend to mine will be patient data that can be linked to small molecules:
+
+  - medical/Drug History
+
+  - Biological Data
+
+  - Patient Demographics, and Predispositions
+
+We hope to discover any information that will help link small molecules and drugs to risk reduction or improvement of Alzheimer's disease. These insights will facilitate further testing of small molecules using Autodock Vina and in vitro / vivo studies during this research term and those in future studies.
+
+# Data
+
+## About
+
+The data table used in this analysis contains information from the following tables. \
+ \
+__ADNIMERGE:__ Baseline diagnoses and basic patient information have been extracted from ADNIMERGE. ADNIMERGE is a table provided by ADNI containing key information from many other merged data tables and serves as a good starting point for data analysis. \
+
+  - Includes demographics, neuropsychological testing scores, MRI and PET summaries, CSF measures. \
+    
+  - Also includes both a baseline diagnosis and diagnosis at each visit. \
+
+ \
+__RECCMEDS:__ Drug information has been extracted for all study phases from RECCMEDS (Concurrent Medications Log [ADNI1,GO,2,3]). \
+ \
+__INITHEALTH:__ Condition information has been extracted for ADNI3 from INITHEALTH (initial health screening, ADNI3). \
+ \
+__MEDHIST:__ Condition information has been extracted for ADNI1/GO/2 from MEDHIST (Medical History [ADNI1,GO,2]). \
+ \
+__RECMHIST:__ Key recent condition information has been extracted for ADNI1/GO/2 from RECMHIST (Recent Medical History Details Log [ADNI1,GO,2]). \
+ \
+__LABDATA:__ Bio sample information has been extracted for ADNI1/GO/2 from LABDATA (Laboratory Data [ADNI1,GO, 2]) \
+ \
+__URMC_LABDATA:__ Bio sample information has been extracted for ADNI13 from URMC_LABDATA (Laboratory Data [3]) \
+
+## Prep
+
+The data in used in this analysis is pre assembled and cleaned. \
+ \
+__See:__ _Analysis-Data-Prep.Rmd_ \
+for data assembly.
+ \
+__See:__ _Full-Table-Cleaning.Rmd_ \
+for data cleaning.
+
+### Required Libraries
+
+```{r, message=FALSE, warning=FALSE}
+library(rstatix)
+library(maditr)
+library(ordinalNet)
+library(caret)
+library(leaps)
+library(nnet)
+library(MASS)
+library(glmnet)
+library(survival)
+library(tidyverse)
+library(lubridate)
+library(Rdimtools)
+library(janitor)
+library(survival)
+library(survminer)
+```
+
+### Reading Data
+
+```{r, message=FALSE, warning=FALSE}
+data_cleaned <- read_csv(".../main_data_cleaned.csv", col_types = cols(
+  .default = col_double(),
+  VISCODE2 = col_character(),
+  COLPROT = col_character(),
+  DX_bl = col_character(),
+  AGE = col_double(),
+  PTGENDER = col_character(),
+  PTETHCAT = col_character(),
+  PTRACCAT = col_character(),
+  PTMARRY = col_character(),
+  study_enrolled = col_character(),
+  DX_bl_recoded = col_character(),
+  st_enrol_dx_bl = col_character()
+  )
+)
+```
+
+### Analysing NA Values
+
+```{r, message=FALSE, warning=FALSE}
+na_amounts <- data_cleaned %>%
+  summarise_all(
+    function(col) sum(is.na(col))
+  ) %>%
+  rowid_to_column()
+
+na_amounts <- dcast(melt(na_amounts, id.vars = "rowid"), variable ~ rowid) %>%
+  rename(n_na = "1") %>%
+  arrange(desc(n_na))
+
+write_csv(na_amounts, ".../na_amounts.csv")
+```
+
+# Analysis
+
+Use the feature selection / variable screening techniques to find associations between aspects of patient data and their AD assessments. The AD assessment that will be used to categorize patients is their diagnosis at base line. This diagnoses is reliable as it is the result of blood / urine / CSF tests, PET and MRI scans, and neuropsychological examinations.\
+ \
+Each patient variable will be compared and screened for its connection to the patients baseline diagnoses via by multiple analyses depending on the data type. These variable screening analyses will include:
+
+  - Penalized Ordinal Regression
+  
+  - Regularized Cox Proportional Hazards Regression
+  
+  - ChiSq
+  
+  - t-test / Anova
+
+Each technique will tell us if there is a useful connection between the independent and dependent variable. We can then use this information to assess if we want to investigate the insight further. \
+ \
+The methodlogy for this analysis has been inspired from the following article: \
+<https://towardsdatascience.com/the-5-feature-selection-algorithms-every-data-scientist-need-to-know-3a6b566efd2>
+
+## Penalized Ordinal Regression
+
+### Data Prep
+
+#### ADNI1GO2
+
+```{r, message=FALSE, warning=FALSE}
+POR_data_ADNI1GO2 <- data_cleaned %>%
+  select(5, 7, 11, 12, 17, 19:124, 165: 198, 200:218, "HMT13", "HMT102", "HMT4", "HMT2", "RCT29", "BAT126", "HMT100", "HMT10", "HMT11", "HMT12", "HMT15", "HMT16", "HMT17", "HMT18", "HMT19", "HMT3", "HMT40", "HMT7", "HMT8", "HMT9", "RCT5", "RCT14", "RCT1", "RCT13", "RCT4", "RCT11", "RCT19", "RCT20", "RCT9", "RCT12", "RCT1407", "RCT183", "RCT3", "RCT392", "RCT6", "RCT8") %>%
+  drop_na() %>%
+  select_if(function(col) 
+    if (is.character(col)) {TRUE}
+    else if (sum(col) > 29) {TRUE}
+    else FALSE
+  )
+
+x_ADNI1GO2 <- POR_data_ADNI1GO2 %>%
+  select(-DX_bl_recoded) %>%
+  as.matrix
+
+y_ADNI1GO2 <- as.factor(
+  mutate(POR_data_ADNI1GO2[5], DX_bl_recoded = 
+    case_when(
+      DX_bl_recoded == "CN" ~ 1,
+      DX_bl_recoded == "MCI" ~ 2,
+      DX_bl_recoded == "AD" ~ 3,
+    )
+  )[[1]]
+)
+```
+
+#### ADNI3
+
+```{r, message=FALSE, warning=FALSE}
+# Bio Data Excluded for Being To Missing
+POR_data_ADNI3 <- data_cleaned %>%
+  select(5, 7, 11, 12, 17, 19:164) %>%
+  drop_na() %>%
+  select_if(function(col) 
+    if (is.character(col)) {TRUE}
+    else if (sum(col) > 29) {TRUE}
+    else FALSE
+  )
+
+x_ADNI3 <- POR_data_ADNI3 %>%
+  select(-DX_bl_recoded) %>%
+  as.matrix
+
+y_ADNI3 <- as.factor(
+  mutate(POR_data_ADNI3[5], DX_bl_recoded = 
+    case_when(
+      DX_bl_recoded == "CN" ~ 1,
+      DX_bl_recoded == "MCI" ~ 2,
+      DX_bl_recoded == "AD" ~ 3,
+    )
+  )[[1]]
+)
+```
+
+### Model Fitting
+
+#### ADNI1GO2
+
+```{r, message=FALSE, warning=FALSE}
+fit1_ADNI1GO2 <- ordinalNet(x_ADNI1GO2,
+                   y_ADNI1GO2,
+                   family = "cumulative",
+                   link = "logit",
+                   standardize = TRUE,
+                   parallelTerms=TRUE, nonparallelTerms=FALSE)
+```
+
+#### ADNI3
+
+```{r, message=FALSE, warning=FALSE}
+fit1_ADNI3 <- ordinalNet(x_ADNI3,
+                   y_ADNI3,
+                   family = "cumulative",
+                   link = "logit",
+                   standardize = TRUE,
+                   parallelTerms=TRUE, nonparallelTerms=FALSE)
+```
+
+### Results
+
+#### ADNI1GO2
+
+```{r, message=FALSE, warning=FALSE}
+specify_decimal <- function(x, k) trimws(format(round(x, k), nsmall=k))
+
+as.data.frame(
+  coef(fit1_ADNI1GO2, matrix=TRUE)
+) %>%
+  select(1)  %>%
+  rename(logit = 'logit(P[Y<=1])') %>%
+  filter(logit != 0) %>%
+  rownames_to_column() %>%
+  mutate(coef_sign = 
+    case_when(
+      logit < 0 ~ "-",
+      logit > 0 ~ "+"
+    )
+  ) %>%
+  mutate(logit = abs(logit)) %>%
+  arrange(desc(logit)) %>%
+  mutate(logit = specify_decimal(logit, 3))
+```
+
+#### ADNI3
+
+```{r, message=FALSE, warning=FALSE}
+as.data.frame(
+  coef(fit1_ADNI3, matrix=TRUE)
+) %>%
+  select(1)  %>%
+  rename(logit = 'logit(P[Y<=1])') %>%
+  filter(logit != 0) %>%
+  rownames_to_column() %>%
+  mutate(coef_sign = 
+    case_when(
+      logit < 0 ~ "-",
+      logit > 0 ~ "+"
+    )
+  ) %>%
+  mutate(logit = abs(logit)) %>%
+  arrange(desc(logit)) %>%
+  mutate(logit = specify_decimal(logit, 3))
+```
+
+Here a sign of + means less AD and a sign of - means the opposite.
+
+## Regularized Cox Proportional Hazards Regression
+
+### Data Prep
+
+```{r, message=FALSE, warning=FALSE}
+subjects <- data_cleaned %>%
+  filter(COLPROT != 'ADNI3') %>%
+  filter(DX_bl_recoded == 'MCI') %>%
+  select(1, 5, 7, 11, 12, 17, 19:124, 165: 198, 200:218, "HMT13", "HMT102", "HMT4", "HMT2", "RCT29", "BAT126", "HMT100", "HMT10", "HMT11", "HMT12", "HMT15", "HMT16", "HMT17", "HMT18", "HMT19", "HMT3", "HMT40", "HMT7", "HMT8", "HMT9", "RCT5", "RCT14", "RCT1", "RCT13", "RCT4", "RCT11", "RCT19", "RCT20", "RCT9", "RCT12", "RCT1407", "RCT183", "RCT3", "RCT392", "RCT6", "RCT8") %>%
+  drop_na() %>%
+  select_if(function(col) 
+    if (is.character(col)) {TRUE}
+    else if (sum(col) > 29) {TRUE}
+    else FALSE
+  )
+
+follow_ups <- read_csv('/Users/liamf/OneDrive/Documents/ADNI/Data/ADNIMERGE.csv') %>%
+  filter(RID %in% subjects[[1]]) %>%
+  filter(VISCODE != "bl") %>%
+  drop_na(DX) %>%
+  rename(VISCODE2 = VISCODE) %>%
+  mutate(EXAMDATE = str_replace_all(EXAMDATE, "-", "/")) %>%
+  mutate(EXAMDATE = ymd(EXAMDATE)) %>%
+  mutate(phase_VIS_EXAM_DX = paste(COLPROT, VISCODE2, EXAMDATE, DX, sep = " ")) %>%
+  group_by(RID) %>%
+  arrange(-desc(EXAMDATE)) %>%
+  mutate(visits = paste0(phase_VIS_EXAM_DX, collapse = ", ")) %>%
+  group_by(RID, visits) %>%
+  summarise() %>%
+  mutate(visits = strsplit(visits, ", "))
+
+surv_data <- data.frame(RID = double(), mci_to_dimentia = integer(), date = character(), stringsAsFactors=FALSE)
+vector = follow_ups[[2]]
+
+for (i in 1:nrow(follow_ups)) {
+  vec = vector[[i]]
+  dimentia_coverted <- 0
+  final_date <- strsplit(vec[length(vec)], " ")[[1]][3]
+  
+  for (elem in vec) {
+    visit <- strsplit(elem, " ")[[1]]
+
+    if (visit[4] == "Dementia") {
+      dimentia_coverted <- 1
+      final_date <- visit[3]
+    }
+  }
+  surv_data[nrow(surv_data) + 1,] = c(follow_ups[[1]][i], dimentia_coverted, final_date)
+}
+
+surv_data <- surv_data %>%
+  mutate(date = ymd(date)) %>%
+  left_join(read_csv('/Users/liamf/OneDrive/Documents/ADNI/Data/ADNIMERGE.csv') %>%
+              filter(VISCODE == "bl") %>%
+              mutate(RID = as.character(RID)) %>%
+              select(RID, EXAMDATE), 
+            by = c("RID")) %>%
+  mutate(t_dif = as.integer(difftime(date, EXAMDATE))) %>%
+  mutate(RID = as.double(RID)) %>%
+  filter(RID != 987) %>%
+  filter(RID != 5066) %>%
+  arrange(-desc(RID)) %>%
+  select(RID, mci_to_dimentia, t_dif) %>%
+  rename(time = t_dif) %>%
+  mutate(time = as.numeric(time)) %>%
+  rename(status = mci_to_dimentia) %>%
+  mutate(status = as.numeric(status))
+
+subjects <- subjects %>%
+  filter(RID %in% surv_data[[1]]) %>%
+  arrange(-desc(RID)) %>%
+  select(-RID, -DX_bl_recoded)
+```
+
+The result here is a table *surv_data* which has status (developed Dementia or not) and the time is took to develop it. The other table is the patient information at their initial base line assessment which is the same data used for Penalized Ordinal Regression. An important note here as well is that only patients starting in ADNI1 / GO / 2 were included though they were followed into ADNI3.
+
+### Model Fitting
+
+```{r, message=FALSE, warning=FALSE}
+x <- as.matrix(subjects)
+y = as.matrix(surv_data %>% select(-RID))
+
+cvfit <- cv.glmnet(x, y, family = "cox", type.measure = "C")
+```
+
+### Results
+
+```{r, message=FALSE, warning=FALSE}
+cvfit$lambda.min
+cvfit$lambda.1se
+coef(cvfit)
+```
+
+Here a coefficient of - means less AD and + means more. 
+
+### Assumption Checking
+
+```{r, message=FALSE, warning=FALSE}
+res.cox <- coxph(Surv(time, status) ~ APOE4 + MMSE_bl + CMMED_aricept + HMT16, data = surv_data %>% add_column(subjects))
+test.ph <- cox.zph(res.cox)
+test.ph
+ggcoxzph(test.ph)
+```
+
+## ChiSquared
+
+### ADNI1GO2
+
+```{r, message=FALSE, warning=FALSE}
+Chi_data_ADNI1GO2 <- data.frame(x = character(), y = character(), p = double(), statistic = double())
+
+for (x in append(c(3), 6:117)) {
+  test <- chisq.test(POR_data_ADNI1GO2[[x]], POR_data_ADNI1GO2[[5]])
+  Chi_data_ADNI1GO2[nrow(Chi_data_ADNI1GO2) + 1,] <- c(names(POR_data_ADNI1GO2)[[x]], names(POR_data_ADNI1GO2)[[5]], test$p.value[[1]], test$statistic[[1]])
+}
+
+Chi_data_ADNI1GO2 <- Chi_data_ADNI1GO2 %>%
+  mutate(p = as.numeric(p)) %>%
+  arrange(-desc(p)) %>%
+  filter(p <= 0.05) %>%
+  mutate(x = str_remove_all(x, " "))
+Chi_data_ADNI1GO2
+```
+
+No direction of association only significance.
+
+### ADNI3
+
+```{r, message=FALSE, warning=FALSE}
+Chi_data_ADNI3 <- data.frame(x = character(), y = character(), p = double(), statistic = double())
+
+for (i in append(append(c(3), 6:43), 45:60)) {
+  test <- chisq.test(POR_data_ADNI3[[i]], POR_data_ADNI3[[5]])
+  Chi_data_ADNI3[nrow(Chi_data_ADNI3) + 1,] <- c(names(POR_data_ADNI3)[[i]], names(POR_data_ADNI3)[[5]], test$p.value[[1]], test$statistic[[1]])
+}
+
+Chi_data_ADNI3 <- Chi_data_ADNI3%>%
+  mutate(p = as.numeric(p)) %>%
+  arrange(-desc(p)) %>%
+  filter(p <= 0.05) %>%
+  mutate(x = str_remove_all(x, " "))
+Chi_data_ADNI3
+```
+
+No direction of association only significance.
+
+### Checking for Age as Confounding
+
+```{r, message=FALSE, warning=FALSE}
+assump_data <- POR_data_ADNI1GO2
+colnames(assump_data) <- gsub(" ", "", colnames(assump_data))
+
+for (x in Chi_data_ADNI1GO2[[1]]) {
+  frm <- formula(paste("AGE~", x))
+  model <- lm(frm, data = assump_data)
+  print(summary(model)$coefficients)
+  print(assump_data %>%
+    group_by((!!as.name(x))) %>%
+    summarise(avg = mean(AGE)))
+}
+
+assump_data2 <- POR_data_ADNI3
+colnames(assump_data2) <- gsub(" ", "", colnames(assump_data2))
+
+for (x in Chi_data_ADNI3[[1]]) {
+  frm <- formula(paste("AGE~", x))
+  model <- lm(frm, data = assump_data2)
+  print(summary(model)$coefficients)
+  print(assump_data2 %>%
+    group_by((!!as.name(x))) %>%
+    summarise(avg = mean(AGE)))
+}
+```
+
+No direction of association only significance.
+
+## Anova
+
+### ADNI1GO2
+
+```{r, message=FALSE, warning=FALSE}
+ano_data_ADNI1GO2 <- data.frame(x = character(), y = character(), anova_f_statistic = double(), p_CN_t_test = double(), p_MCI_t_test = double(), CN_coef = double(), MCI_coef = double())
+names_anova <- c("AGE",	"PTEDUCAT",	"MMSE_bl", "HMT13", "HMT102", "HMT4", "HMT2", "RCT29", "BAT126", "HMT100", "HMT10", "HMT11", "HMT12", "HMT15", "HMT16", "HMT17", "HMT18", "HMT19", "HMT3", "HMT40", "HMT7", "HMT8", "HMT9", "RCT5", "RCT14", "RCT1", "RCT13", "RCT4", "RCT11", "RCT19", "RCT20", "RCT9", "RCT12", "RCT1407", "RCT183", "RCT3", "RCT392", "RCT6", "RCT8")
+
+for (x in names_anova) {
+  frm <- formula(paste(x, "~DX_bl_recoded"))
+  model <- lm(frm, data = POR_data_ADNI1GO2)
+  ano_data_ADNI1GO2[nrow(ano_data_ADNI1GO2) + 1,] <- c(x, 
+                                     "DX_bl_recoded",
+                                     summary(model)$fstatistic[[1]],
+                                     summary(model)$coefficients[[2, 4]], 
+                                     summary(model)$coefficients[[3, 4]],
+                                     summary(model)$coefficients[[2, 1]],
+                                     summary(model)$coefficients[[3, 1]])
+}
+
+ano_data_ADNI1GO2 <- ano_data_ADNI1GO2 %>%
+  mutate(p_CN_t_test = as.numeric(p_CN_t_test)) %>%
+  arrange(-desc(p_CN_t_test)) %>%
+  filter(p_CN_t_test <= 0.05)
+ano_data_ADNI1GO2
+```
+
+### ADNI3
+
+```{r, message=FALSE, warning=FALSE}
+ano_data_ADNI3 <- data.frame(x = character(), y = character(), anova_f_statistic = double(), p_CN_t_test = double(), p_MCI_t_test = double(), CN_coef = double(), MCI_coef = double())
+
+names_anova2 <- c("NEU%", "LYM%", "MON%", "EOS%", "BAS%", "NEUA", "LYMA", "MONA", "EOSA", "BASA", "TB", "PLT", "CK", "X338", "K", "CL", "CO2", "UN", "CRE2", "GLU", "CA2", "PO4", "URIC", "TP", "ALB", "ALK", "CHOL", "TRIG", "RBC", "HGB", "HCT", "UPH")
+
+for (x in names_anova2) {
+  ano_data <- data_cleaned %>%
+    select(DX_bl_recoded, x) %>%
+    clean_names() %>%
+    drop_na()
+  frm <- formula(paste(names(ano_data)[2], "~ dx_bl_recoded"))
+  model <- lm(frm, data = ano_data)
+  ano_data_ADNI3[nrow(ano_data_ADNI3) + 1,] <- c(x, 
+                                     "DX_bl_recoded",
+                                     summary(model)$fstatistic[[1]],
+                                     summary(model)$coefficients[[2, 4]], 
+                                     summary(model)$coefficients[[3, 4]],
+                                     summary(model)$coefficients[[2, 1]],
+                                     summary(model)$coefficients[[3, 1]])
+}
+
+ano_data_ADNI3 <- ano_data_ADNI3 %>%
+  mutate(p_CN_t_test = as.numeric(p_CN_t_test)) %>%
+  arrange(-desc(p_CN_t_test)) %>%
+  filter(p_CN_t_test <= 0.05)
+ano_data_ADNI3
+```
+
+### Checking for Age as Confounding
+
+```{r, message=FALSE, warning=FALSE}
+for (x in ano_data_ADNI1GO2[[1]]) {
+  print(paste0(x, ":"))
+  print(cor(assump_data[["AGE"]], assump_data[[x]], method="pearson"))
+}
+
+for (x in ano_data_ADNI3[[1]]) {
+  ano_data <- data_cleaned %>%
+    select(AGE, x) %>%
+    clean_names() %>%
+    drop_na()
+  print(paste0(x, ":"))
+  print(cor(as.matrix(ano_data), method="pearson")[1,2])
+}
+
+ggplot(POR_data_ADNI1GO2, aes(AGE, HMT15)) +
+  geom_point(color = "#4929a3") +
+  theme_minimal()
+ggplot(POR_data_ADNI1GO2, aes(AGE, HMT16)) +
+  geom_point(color = "#4929a3") +
+  theme_minimal()
+ggplot(POR_data_ADNI1GO2, aes(AGE, RCT8)) +
+  geom_point(color = "#4929a3") +
+  theme_minimal()
+
+ggplot(POR_data_ADNI1GO2, aes(DX_bl_recoded, HMT15)) +
+  geom_boxplot(color = "#4929a3") +
+  theme_minimal()
+ggplot(POR_data_ADNI1GO2, aes(DX_bl_recoded, HMT16)) +
+  geom_boxplot(color = "#4929a3") +
+  theme_minimal()
+ggplot(POR_data_ADNI1GO2, aes(DX_bl_recoded, RCT8)) +
+  geom_boxplot(color = "#4929a3") +
+  theme_minimal()
+```
+
+# Example Visualizations of results
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(POR_data_ADNI1GO2) +
+  theme_minimal() +
+  geom_boxplot(aes(DX_bl_recoded, HMT8))
+
+library(ggmosaic)
+#> Loading required package: ggplot2
+POR_data_ADNI1GO2 %>%
+  rename(Diagnosis = DX_bl_recoded) %>%
+  ggplot() +
+    geom_mosaic(aes(x = product(APOE4), fill=Diagnosis)) +
+    theme_mosaic() +
+    theme(text = element_text(size = 20))   
+
+POR_data_ADNI1GO2 %>%
+  rename(Diagnosis = DX_bl_recoded) %>%
+  rename(CoenzymeQ10 = "CMMED_coenzyme q10") %>%
+  ggplot() +
+    geom_mosaic(aes(x = product(CoenzymeQ10), fill=Diagnosis)) +
+    theme_mosaic() +
+    theme(text = element_text(size = 20))
+```
+
+## Age by Diagnosis ADNI1GO2
+
+```{r, message=FALSE, warning=FALSE}
+POR_data_ADNI1GO2 %>%
+  group_by(DX_bl_recoded) %>%
+  summarise(avg = mean(AGE))
+```
+
+# Conclusions
+
+Results are interesting. Will require some processing and thought.
+
+# Considerations for Future Analyses
+
+  - Should redo the univariate tests while controlling for the affect of age.
+  
+  - Could refine methodology of variable extraction from text. Instead of doing text cleaning, reduce number of false negatives by word extraction.
